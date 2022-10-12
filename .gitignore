@@ -1,0 +1,5 @@
+/node_modules
+/tmp/
+/src/
+.DS_Store
+config.js
