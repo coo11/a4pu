@@ -2,4 +2,5 @@
 /tmp/
 /src/
 .DS_Store
+*.mp4
 config.js

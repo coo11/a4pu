@@ -1,41 +1,14 @@
 import fs from 'fs';
+import esMain from 'es-main';
 import express from 'express';
 import morgan from 'morgan';
 import axios from 'axios';
-import config from './config.js';
 import AdmZip from 'adm-zip';
-import { createFFmpeg, fetchFile } from '@ffmpeg/ffmpeg';
+import chalk from 'chalk';
 
-const app = express();
-app.use(morgan('dev'));
-const port = process.env.PORT || config.port;
-
-const ffmpegInstance = createFFmpeg({
-    log: true
-});
-let ffmpegLoadingPromise = ffmpegInstance.load();
+import config from './config.js';
 
 const ugoiraConvertQueue = [];
-
-async function getFFmpeg() {
-    if (ffmpegLoadingPromise) {
-        await ffmpegLoadingPromise;
-        ffmpegLoadingPromise = undefined;
-    }
-
-    return ffmpegInstance;
-}
-
-function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms))
-}
-
-app.get("/", async (req, res) => {
-    res.status(200).send('Hello World!')
-})
-
-/* app.get("/favicon.ico", (req, res) => { return res.status(404).end(); }); */
-
 const ugoiraMetaRequest = axios.create({
     baseURL: 'https://www.pixiv.net/ajax/',
     validateStatus: status => status < 500,
@@ -44,6 +17,60 @@ const ugoiraMetaRequest = axios.create({
         'Cookie': config.pixiv.cookie
     }
 })
+
+// Decide use native FFmpeg or FFmpeg.wasm
+let ffmpegInstance,
+    ffmpegLoadingPromise,
+    useNativeFfmpeg = false,
+    ffPath = config.ffmpeg.path;
+if (ffPath && fs.existsSync(ffPath)) {
+    console.info('Use Native FFmpeg.')
+    ffmpegLoadingPromise = new Promise(resolve => import('./utils/ffmpeg.js').then(({ ffmpeg }) => {
+        ffmpegInstance = ffmpeg;
+        useNativeFfmpeg = true;
+        resolve();
+    }))
+} else {
+    console.info('Use FFmpeg.wasm.')
+    ffmpegLoadingPromise = new Promise(resolve => import('@ffmpeg/ffmpeg').then(({ createFFmpeg }) => {
+        ffmpegInstance = createFFmpeg({ log: true });
+        resolve(ffmpegInstance.load());
+    }))
+}
+async function initFFmpeg() {
+    if (ffmpegLoadingPromise) {
+        await ffmpegLoadingPromise;
+        ffmpegLoadingPromise = undefined;
+    }
+    return ffmpegInstance;
+}
+
+let args = process.argv.slice(2),
+    isCliMode = esMain(import.meta);
+if (!isCliMode || args.length === 0) {
+    console.log(chalk.bgGreen('You can execute me with Pixiv ugoira post number ID as arguments or leave blank running as a backend service.\n'
+        + 'Multiple posts can be separated by English comma or space.'))
+    isCliMode = false;
+} else {
+    args = args.join(' ').split(/,|\s/).filter(arg => !!arg);
+    if (args.every(arg => /^\d+$/.test(arg))) {
+        for (let arg of args) {
+            console.log(chalk.bgYellow(`Processing ${arg}....`))
+            await ugoira2mp4(arg);
+        }
+    } else {
+        console.log(chalk.bgRed('Invalid arguments.\nPlease only input numbers sparated by English comma or space only.'))
+    }
+    process.exit(0);
+}
+
+const app = express();
+app.use(morgan('dev'));
+const port = process.env.PORT || config.port;
+
+app.get("/", async (req, res) => { res.status(200).send('Hello World!') })
+
+/* app.get("/favicon.ico", (req, res) => { return res.status(404).end(); }); */
 
 app.get(/\/ugoira2mp4\/\d+\.mp4/, async (req, res) => {
     let id = req.path.split(/\/|\./)?.[2];
@@ -100,7 +127,7 @@ async function getUgoiraData(url, savePath) {
 
 async function ugoira2mp4(id, retryTimes = 0) {
     if (retryTimes > 3) {
-        console.error("Retry times exceed 3.")
+        console.log(chalk.bgRed("Retry times exceed 3."))
         return;
     }
     if (ugoiraConvertQueue.length > 4 || ugoiraConvertQueue.indexOf(id) > -1) {
@@ -138,7 +165,7 @@ async function ugoira2mp4(id, retryTimes = 0) {
 }
 
 async function frames2mp4(frames, id = '1') {
-    const ffmpeg = await getFFmpeg();
+    const ffmpeg = await initFFmpeg();
     const len = frames.length;
     let argsOfInput = [],
         filterComplexStr = '',
@@ -146,9 +173,10 @@ async function frames2mp4(frames, id = '1') {
     // https://superuser.com/a/1098315
     // https://github.com/my-telegram-bots/Pixiv_bot/blob/f67df3096c52d21aba9004bc0400c690a14edc97/handlers/pixiv/tools.js#L174
     for (let i = 0; i < len; i++) {
-        const { file, delay } = frames[i];
-        ffmpeg.FS('writeFile', file, await fetchFile(`./tmp/${id}/${file}`));
-        argsOfInput = argsOfInput.concat(['-i', file]);
+        const { file, delay } = frames[i],
+            realPath = `./tmp/${id}/${file}`;
+        !useNativeFfmpeg && ffmpeg.FS('writeFile', file, fs.readFileSync(realPath));
+        argsOfInput = argsOfInput.concat(['-i', useNativeFfmpeg ? realPath : file]);
         filterComplexStrConcat += `[f${i + 1}]`;
         if (i === len - 1);
         else if (i === len - 2) {
@@ -160,18 +188,22 @@ async function frames2mp4(frames, id = '1') {
         } else filterComplexStr += `[${i + 1}]settb=1/1000,setpts=PTS+${delay / 1000}/TB[f${i + 1}]; `
     }
     const convertTs = new Date().getTime(),
-        saveName = `${convertTs}-${id}.mp4`;
-    await ffmpeg.run(...argsOfInput,
+        saveName = isCliMode ? `${id}.mp4` : `${convertTs}-${id}.mp4`,
+        savePath = isCliMode ? `./${saveName}` : `./src/${saveName}`;
+    await (useNativeFfmpeg ? ffmpeg : ffmpeg.run)(...argsOfInput,
         '-hide_banner',
         '-c:v', 'libx264',
         '-filter_complex', filterComplexStr,
         '-vsync', 'vfr',
         '-r', '1000',
         '-video_track_timescale', '1000',
-        saveName)
-    fs.writeFileSync(`./src/${saveName}`, ffmpeg.FS('readFile', saveName));
-    argsOfInput.forEach((filename, index) => index % 2 === 1 && ffmpeg.FS('unlink', filename));
-    ffmpeg.FS('unlink', saveName);
+        useNativeFfmpeg ? savePath : saveName)
+    if (!useNativeFfmpeg) {
+        fs.writeFileSync(savePath, ffmpeg.FS('readFile', saveName));
+        argsOfInput.forEach((filename, index) => index % 2 === 1 && ffmpeg.FS('unlink', filename));
+        ffmpeg.FS('unlink', saveName);
+    }
+    console.log(chalk.bgGreen('Post ') + chalk.bgCyan(`<${id}>`) + chalk.bgGreen(` has been saved to '${savePath}' successfully.`))
     return true;
 }
 
@@ -180,6 +212,6 @@ function removeConvertCache(id) {
     ugoiraConvertQueue.splice(ugoiraConvertQueue.indexOf(id), 1);
 }
 
-app.listen(port, () => { console.log(`Started on port ${port}`); });
+app.listen(port, () => { console.log(chalk.bgYellow(`Started on port ${port}`)); });
 
 export default app;

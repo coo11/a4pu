@@ -13,6 +13,8 @@
     "@ffmpeg/ffmpeg": "^0.11.5",
     "adm-zip": "^0.5.9",
     "axios": "^0.27.2",
+    "chalk": "^5.1.2",
+    "es-main": "^1.2.0",
     "express": "^4.18.1",
     "morgan": "^1.10.0"
   }
