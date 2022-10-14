@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "buildCommand": "mv config_sample config.js && rm -rf index.js ./utils",
+  "buildCommand": "mv config_sample.js config.js && rm -rf index.js ./utils",
   "functions": {
     "api/index.js": {
       "includeFiles": "node_modules/@ffmpeg/core/**"
