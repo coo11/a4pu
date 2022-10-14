@@ -1,0 +1,19 @@
+{
+  "version": 2,
+  "buildCommand": "mv config_sample config.js && rm -rf index.js ./utils",
+  "functions": {
+    "api/index.js": {
+      "includeFiles": "node_modules/@ffmpeg/core/**"
+    }
+  },
+  "outputDirectory": "/",
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "/api"
+    }
+  ],
+  "github": {
+    "silent": true
+  }
+}
